@@ -4,68 +4,61 @@ import (
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/go-resty/resty/v2"
+	"log"
 	"os"
 	"strings"
 )
-type Novel struct {
-	host string
-	url string
-	chapter_all ChapterAll
-	name      string
-	author    string
-	category  string
-	status    string
-	intro     string
-	cover_url string
-	chapter_list []Chapter
 
-	sync_dir_path string
+type Novel struct {
+	id       int64
+	host     string
+	url      string
+	name     string
+	author   string
+	category string
+	status   string
+	intro    string
+	coverUrl string
+
+	chapterAll  ChapterAll
+	chapterList []Chapter
+	syncDirPath string
 }
 type Chapter struct {
-	url string
-	title string
+	url     string
+	title   string
 	content string
-	seq int
+	seq     int
+	novelId int
 }
 
 type ChapterAll struct {
 	url string
 }
-func (novel *Novel) init_config(){
-	err := os.MkdirAll(novel.sync_dir_path, 0755) // 权限设置为 rwxr-xr-x
+
+func (novel *Novel) initDir() {
+	err := os.MkdirAll(novel.syncDirPath, 0755) // 权限设置为 rwxr-xr-x
 	if err != nil {
 		fmt.Println("创建目录失败:", err)
 		return
 	}
 }
 
-func (chapter_all *ChapterAll) parse(novel *Novel) {
-	clien := resty.New()
-	resp, err := clien.R().Get(chapter_all.url)
+func (novel *Novel) parse() {
+	client := resty.New()
+	resp, err := client.R().Get(novel.url)
 	if err != nil {
-		fmt.Println(err)
-		return;
+		log.Printf("NovelParse: 小说：【%s】主页请求失败：%v", novel.name, err)
+		return
 	}
 	html := resp.String()
+	host := resp.Request.RawRequest.Host
+
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-
-	doc.Find("body > div.book_last > dl > dd > a").Each(func(i int, s *goquery.Selection) {
-		href,_ := s.Attr("href")
-		title := s.Text()
-		chapter_url := "https://" + novel.host + href
-		novel.chapter_list = append(novel.chapter_list, Chapter{ url: chapter_url, title: title, seq: i})
-	})
-}
-
-func (novel *Novel) parse(){
-	clien := resty.New()
-	resp, err := clien.R().Get(novel.url)
 	if err != nil {
-		fmt.Println(err)
-		return;
+		log.Printf("NovelParse: 小说：【%s】主页解析失败：%v", novel.name, err)
+		return
 	}
-	html := resp.String()
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	doc.Find("body > div.books > div.book_info > div.book_box > dl > dt").Each(func(i int, s *goquery.Selection) {
 		novel.name = s.Text()
 	})
@@ -75,41 +68,71 @@ func (novel *Novel) parse(){
 	doc.Find("body > div.books > div.book_info > div.book_box > dl > dd:nth-child(2) > span:nth-child(2)").Each(func(i int, s *goquery.Selection) {
 		novel.category = s.Text()
 	})
-
-	var all_chapter_url string
-	doc.Find("body > div.books > div.book_more > a").Each(func(i int, s *goquery.Selection) {
-		all_chapter_url, _ = s.Attr("href")
+	doc.Find("body > div.books > div.book_info > div.book_box > dl > dd:nth-child(3) > span:nth-child(1)").Each(func(i int, s *goquery.Selection) {
+		novel.status = s.Text()
 	})
-	host := resp.Request.RawRequest.Host
-	all_chapter_url = "https://" + host + all_chapter_url
+	doc.Find("body > div.books > div.book_info > div.cover > img").Each(func(i int, s *goquery.Selection) {
+		novel.coverUrl = s.Text()
+	})
+	doc.Find("body > div.books > div.book_about > dl > dd").Each(func(i int, s *goquery.Selection) {
+		novel.intro = s.Text()
+	})
+	novel.syncDirPath = novel.syncDirPath + "\\" + novel.name
 	novel.host = host
-	novel.chapter_all = ChapterAll{url: all_chapter_url}
-	novel.sync_dir_path = novel.sync_dir_path + "\\" + novel.name
-	novel.chapter_all.parse(novel)
-}
 
-func (chapter *Chapter) parse(){
-	clien := resty.New()
-	resp, err := clien.R().Get(chapter.url)
+	var allChapterUrl string
+	doc.Find("body > div.books > div.book_more > a").Each(func(i int, s *goquery.Selection) {
+		allChapterUrl, _ = s.Attr("href")
+	})
+	allChapterUrl = "https://" + host + allChapterUrl
+	novel.chapterAll = ChapterAll{url: allChapterUrl}
+	novel.chapterAll.parse(novel)
+}
+func (chapterAll *ChapterAll) parse(novel *Novel) (result bool) {
+	client := resty.New()
+	resp, err := client.R().Get(chapterAll.url)
 	if err != nil {
-		fmt.Println("请求章节内容失败！【%s】，【%s】", chapter.title, chapter.url)
-		return;
+		log.Printf("ChapterAllParse: 小说：【%s】请求章节列表失败：%v", novel.name, err)
+		return false
 	}
 	html := resp.String()
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		fmt.Println("解析html内容失败！【%s】，【%s】", chapter.title, chapter.url)
-		return;
+		log.Printf("ChapterAllParse: 小说：【%s】解析章节列表DOM失败：%v", novel.name, err)
+		return false
+	}
+
+	doc.Find("body > div.book_last > dl > dd > a").Each(func(i int, s *goquery.Selection) {
+		href, _ := s.Attr("href")
+		title := s.Text()
+		chapterUrl := "https://" + novel.host + href
+		novel.chapterList = append(novel.chapterList, Chapter{url: chapterUrl, title: title, seq: i})
+	})
+	return true
+}
+
+func (chapter *Chapter) parse() {
+	client := resty.New()
+	resp, err := client.R().Get(chapter.url)
+	if err != nil {
+		log.Printf("ChapterParse: 请求章节【%s】失败：%v", chapter.title, err)
+		return
+	}
+	html := resp.String()
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		log.Printf("ChapterParse: 解析章节【%s】DOM失败：%v", chapter.title, err)
+		return
 	}
 	doc.Find("#chaptercontent").Each(func(i int, s *goquery.Selection) {
 		chapter.content, _ = s.Html()
 	})
 }
 
-func (chapter *Chapter) sync_file(novel *Novel){
-	err := os.WriteFile(novel.sync_dir_path + "\\" + chapter.title + ".txt", []byte(chapter.content), 0644)
+func (chapter *Chapter) syncFile(novel *Novel) {
+	err := os.WriteFile(novel.syncDirPath+"\\"+chapter.title+".txt", []byte(chapter.content), 0644)
 	if err != nil {
-		panic(err)
+		log.Printf("ChapterSave: 保存章节【%s】失败：%v", chapter.title, err)
 	}
-	fmt.Printf("【%s】章节内容已成功保存\n", chapter.title)
+	log.Printf("ChapterSave: 保存章节【%s】成功！", chapter.title)
 }
